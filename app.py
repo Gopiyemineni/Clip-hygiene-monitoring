@@ -1,405 +1,437 @@
-import cv2
+"""
+Complete CLIP Hygiene Classification System
+==========================================
+
+This system uses CLIP transformer model to classify hygiene levels in different areas:
+- Toilets/Bathrooms
+- Kitchens
+- Hospital areas
+- Dining tables
+
+Installation:
+pip install transformers torch torchvision pillow requests numpy
+
+Usage:
+python hygiene_classifier.py
+"""
+
 import torch
-import numpy as np
+from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
-import time
-from collections import defaultdict, deque
+import numpy as np
+import requests
+from io import BytesIO
+import os
+import sys
 
-# Try to import required modules
-try:
-    from transformers import BlipProcessor, BlipForConditionalGeneration
-    from transformers import pipeline
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    print("Transformers not found. Please install it using:")
-    print("pip install transformers")
-    TRANSFORMERS_AVAILABLE = False
-
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    print("YOLOv8 not found. Please install it using:")
-    print("pip install ultralytics")
-    YOLO_AVAILABLE = False
-
-class PersonActivityTrackerTransformers:
-    def __init__(self):
-        # Check if required modules are available
-        if not TRANSFORMERS_AVAILABLE:
-            raise ImportError("Transformers module not found. Please install it first.")
-        if not YOLO_AVAILABLE:
-            raise ImportError("YOLO module not found. Please install ultralytics first.")
-            
-        # Setup device
+class HygieneClassifier:
+    def __init__(self, model_name="openai/clip-vit-base-patch32"):
+        """Initialize CLIP model using transformers library"""
+        print("Loading CLIP model...")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {self.device}")
         
-        # Load YOLOv8 model for person detection
-        print("Loading YOLOv8 model...")
         try:
-            self.yolo_model = YOLO('yolov8n.pt')
-            print("YOLOv8 model loaded successfully!")
+            self.model = CLIPModel.from_pretrained(model_name).to(self.device)
+            self.processor = CLIPProcessor.from_pretrained(model_name)
+            print(f"✓ Model loaded successfully on {self.device}")
         except Exception as e:
-            print(f"Error loading YOLOv8 model: {e}")
+            print(f"✗ Error loading model: {e}")
+            print("Make sure you have internet connection for first-time download.")
             raise
         
-        # Load BLIP model for image captioning and classification
-        print("Loading BLIP model for activity recognition...")
-        try:
-            self.blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-            self.blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(self.device)
-            print("BLIP model loaded successfully!")
-        except Exception as e:
-            print(f"Error loading BLIP model: {e}")
-            raise
-        
-        # Alternative: Use zero-shot image classification pipeline
-        try:
-            print("Loading zero-shot classification pipeline...")
-            self.classifier = pipeline(
-                "zero-shot-image-classification",
-                model="openai/clip-vit-base-patch32",
-                device=0 if torch.cuda.is_available() else -1
-            )
-            self.use_classifier = True
-            print("Zero-shot classifier loaded successfully!")
-        except Exception as e:
-            print(f"Zero-shot classifier not available: {e}")
-            self.use_classifier = False
-        
-        # Activity labels
-        self.activities = [
-            "person sitting on chair",
-            "person standing upright", 
-            "person walking",
-            "person sleeping in bed",
-            "person talking on phone",
-            "person running fast",
-            "person lying down",
-            "person raising hand up",
-            "person eating food",
-            "person reading book"
+        # Define hygiene indicators for different areas
+        self.hygiene_prompts = {
+            'toilet': {
+                'hygienic': [
+                    "a clean toilet with no stains or dirt",
+                    "a spotless bathroom with clean tiles",
+                    "a well-maintained toilet area",
+                    "a sanitized restroom facility",
+                    "a pristine toilet bowl and surrounding area"
+                ],
+                'unhygienic': [
+                    "a dirty toilet with stains and grime",
+                    "an unclean bathroom with visible dirt",
+                    "a neglected toilet area with poor maintenance",
+                    "an unsanitary restroom facility",
+                    "a filthy toilet with visible contamination"
+                ]
+            },
+            'kitchen': {
+                'hygienic': [
+                    "a clean kitchen with spotless countertops",
+                    "a well-organized kitchen with clean surfaces",
+                    "a sanitized cooking area",
+                    "a pristine kitchen with clean appliances",
+                    "a hygienic food preparation area"
+                ],
+                'unhygienic': [
+                    "a dirty kitchen with food debris and stains",
+                    "an unclean cooking area with grease buildup",
+                    "a messy kitchen with unwashed dishes",
+                    "a contaminated food preparation surface",
+                    "a filthy kitchen with poor sanitation"
+                ]
+            },
+            'hospital': {
+                'hygienic': [
+                    "a sterile hospital room with clean equipment",
+                    "a sanitized medical facility",
+                    "a pristine healthcare environment",
+                    "a well-maintained hospital area",
+                    "a hygienic medical treatment room"
+                ],
+                'unhygienic': [
+                    "an unclean hospital room with contamination",
+                    "a poorly maintained medical facility",
+                    "a dirty healthcare environment",
+                    "an unsanitary hospital area",
+                    "a contaminated medical treatment space"
+                ]
+            },
+            'dining': {
+                'hygienic': [
+                    "a clean dining table with spotless surface",
+                    "a well-set dining area with clean tableware",
+                    "a sanitized eating area",
+                    "a pristine dining table ready for meals",
+                    "a hygienic food serving area"
+                ],
+                'unhygienic': [
+                    "a dirty dining table with food remnants",
+                    "an unclean eating area with stains",
+                    "a messy dining table with spills",
+                    "a contaminated food serving surface",
+                    "a filthy dining area with poor cleanliness"
+                ]
+            }
+        }
+    
+    def classify_area_type(self, image):
+        """Classify what type of area the image shows"""
+        area_prompts = [
+            "a toilet or bathroom",
+            "a kitchen or cooking area", 
+            "a hospital or medical facility",
+            "a dining table or eating area"
         ]
         
-        # Person tracking
-        self.person_tracks = {}
-        self.track_id_counter = 0
-        self.activity_history = defaultdict(lambda: deque(maxlen=8))
+        area_types = ['toilet', 'kitchen', 'hospital', 'dining']
         
-        # Colors for different activities
-        self.activity_colors = {
-            "sitting": (0, 255, 0),      # Green
-            "standing": (255, 0, 0),     # Blue
-            "walking": (0, 165, 255),    # Orange
-            "sleeping": (128, 0, 128),   # Purple
-            "talking": (255, 255, 0),    # Cyan
-            "running": (0, 0, 255),      # Red
-            "lying": (147, 20, 255),     # Pink
-            "raising": (0, 255, 255),    # Yellow
-            "eating": (255, 128, 0),     # Light Blue
-            "reading": (128, 255, 128),  # Light Green
-            "unknown": (255, 255, 255)   # White
-        }
-    
-    def detect_persons(self, frame):
-        """Detect persons using YOLOv8"""
-        results = self.yolo_model(frame, classes=[0])  # Class 0 is 'person'
-        persons = []
-        
-        for result in results:
-            boxes = result.boxes
-            if boxes is not None:
-                for box in boxes:
-                    conf = box.conf.cpu().numpy()[0]
-                    if conf > 0.5:  # Confidence threshold
-                        x1, y1, x2, y2 = box.xyxy.cpu().numpy()[0].astype(int)
-                        persons.append({
-                            'bbox': (x1, y1, x2, y2),
-                            'confidence': conf
-                        })
-        
-        return persons
-    
-    def classify_activity_with_blip(self, person_crop):
-        """Classify person activity using BLIP image captioning"""
         try:
-            # Convert to PIL Image
-            pil_image = Image.fromarray(cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB))
+            # Process inputs
+            inputs = self.processor(
+                text=area_prompts,
+                images=image,
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
             
-            # Generate caption
-            inputs = self.blip_processor(pil_image, return_tensors="pt").to(self.device)
-            
+            # Get predictions
             with torch.no_grad():
-                out = self.blip_model.generate(**inputs, max_length=50, num_beams=5)
-                caption = self.blip_processor.decode(out[0], skip_special_tokens=True)
+                outputs = self.model(**inputs)
+                logits_per_image = outputs.logits_per_image
+                probs = logits_per_image.softmax(dim=-1).cpu().numpy()[0]
             
-            # Analyze caption for activities
-            caption_lower = caption.lower()
-            detected_activity = "unknown"
-            confidence = 0.5
-            
-            activity_keywords = {
-                "sitting": ["sitting", "seated", "chair", "bench"],
-                "standing": ["standing", "upright", "pose"],
-                "walking": ["walking", "moving", "step"],
-                "sleeping": ["sleeping", "lying", "bed", "rest"],
-                "talking": ["talking", "phone", "speaking"],
-                "running": ["running", "jogging", "fast"],
-                "lying": ["lying down", "horizontal", "floor"],
-                "raising": ["raising", "hand up", "waving"],
-                "eating": ["eating", "food", "meal"],
-                "reading": ["reading", "book", "paper"]
-            }
-            
-            for activity, keywords in activity_keywords.items():
-                for keyword in keywords:
-                    if keyword in caption_lower:
-                        detected_activity = activity
-                        confidence = 0.8
-                        break
-                if detected_activity != "unknown":
-                    break
-            
-            return detected_activity, confidence, caption
+            # Return the area type with highest probability
+            max_idx = np.argmax(probs)
+            return area_types[max_idx], probs[max_idx]
             
         except Exception as e:
-            print(f"Error in BLIP classification: {e}")
-            return "unknown", 0.0, ""
-    
-    def classify_activity_with_clip(self, person_crop):
-        """Classify person activity using zero-shot classification"""
-        try:
-            if not self.use_classifier:
-                return "unknown", 0.0
-                
-            # Convert to PIL Image
-            pil_image = Image.fromarray(cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB))
-            
-            # Classify with zero-shot classifier
-            results = self.classifier(pil_image, self.activities)
-            
-            # Get best result
-            best_result = results[0]
-            activity_full = best_result['label']
-            confidence = best_result['score']
-            
-            # Extract main activity word
-            activity = "unknown"
-            for key in self.activity_colors.keys():
-                if key in activity_full.lower():
-                    activity = key
-                    break
-            
-            return activity, confidence
-            
-        except Exception as e:
-            print(f"Error in zero-shot classification: {e}")
+            print(f"Error in area classification: {e}")
             return "unknown", 0.0
     
-    def classify_activity(self, person_crop):
-        """Main activity classification method"""
-        if self.use_classifier:
-            return self.classify_activity_with_clip(person_crop)
-        else:
-            activity, confidence, caption = self.classify_activity_with_blip(person_crop)
-            return activity, confidence
-    
-    def simple_tracker(self, current_persons, threshold=50):
-        """Simple person tracker based on bounding box overlap"""
-        tracked_persons = []
+    def assess_hygiene(self, image, area_type=None):
+        """Assess hygiene level of the given image"""
         
-        for current_person in current_persons:
-            x1, y1, x2, y2 = current_person['bbox']
-            current_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+        # First classify area type if not provided
+        if area_type is None:
+            area_type, confidence = self.classify_area_type(image)
+            print(f"Detected area type: {area_type} (confidence: {confidence:.3f})")
+        
+        # Get relevant prompts for the area type
+        if area_type not in self.hygiene_prompts:
+            return "Unknown area type", 0.0, {}
+        
+        prompts = self.hygiene_prompts[area_type]
+        all_prompts = prompts['hygienic'] + prompts['unhygienic']
+        hygienic_count = len(prompts['hygienic'])
+        
+        try:
+            # Process inputs
+            inputs = self.processor(
+                text=all_prompts,
+                images=image,
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
             
-            best_match_id = None
-            min_distance = float('inf')
+            # Get predictions
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits_per_image = outputs.logits_per_image
+                probs = logits_per_image.softmax(dim=-1).cpu().numpy()[0]
             
-            # Find closest previous person
-            for prev_id, prev_person in self.person_tracks.items():
-                if 'center' in prev_person:
-                    prev_center = prev_person['center']
-                    distance = np.sqrt((current_center[0] - prev_center[0])**2 + 
-                                     (current_center[1] - prev_center[1])**2)
-                    
-                    if distance < min_distance and distance < threshold:
-                        min_distance = distance
-                        best_match_id = prev_id
+            # Calculate hygiene scores
+            hygienic_score = np.mean(probs[:hygienic_count])
+            unhygienic_score = np.mean(probs[hygienic_count:])
             
-            # Assign ID
-            if best_match_id is not None:
-                track_id = best_match_id
+            # Determine classification
+            if hygienic_score > unhygienic_score:
+                classification = "Hygienic"
+                confidence = hygienic_score / (hygienic_score + unhygienic_score)
             else:
-                track_id = self.track_id_counter
-                self.track_id_counter += 1
+                classification = "Unhygienic"
+                confidence = unhygienic_score / (hygienic_score + unhygienic_score)
             
-            # Update tracking info
-            self.person_tracks[track_id] = {
-                'bbox': current_person['bbox'],
-                'center': current_center,
-                'last_seen': time.time()
+            return classification, confidence, {
+                'area_type': area_type,
+                'hygienic_score': float(hygienic_score),
+                'unhygienic_score': float(unhygienic_score),
+                'detailed_scores': {
+                    'hygienic_prompts': [float(score) for score in probs[:hygienic_count]],
+                    'unhygienic_prompts': [float(score) for score in probs[hygienic_count:]]
+                }
             }
             
-            tracked_persons.append({
-                'id': track_id,
-                'bbox': current_person['bbox'],
-                'confidence': current_person['confidence']
-            })
+        except Exception as e:
+            print(f"Error in hygiene assessment: {e}")
+            return "Error", 0.0, {}
+    
+    def detailed_assessment(self, image, area_type=None):
+        """Provide detailed hygiene assessment with specific indicators"""
+        classification, confidence, details = self.assess_hygiene(image, area_type)
         
-        # Clean up old tracks
-        current_time = time.time()
-        self.person_tracks = {
-            k: v for k, v in self.person_tracks.items() 
-            if current_time - v['last_seen'] < 3.0  # Remove tracks older than 3 seconds
+        if not details:
+            return {'error': 'Assessment failed'}
+        
+        area_type = details['area_type']
+        
+        # Get the most relevant indicators
+        hygienic_scores = details['detailed_scores']['hygienic_prompts']
+        unhygienic_scores = details['detailed_scores']['unhygienic_prompts']
+        
+        hygienic_prompts = self.hygiene_prompts[area_type]['hygienic']
+        unhygienic_prompts = self.hygiene_prompts[area_type]['unhygienic']
+        
+        # Find top indicators
+        top_hygienic_idx = np.argmax(hygienic_scores)
+        top_unhygienic_idx = np.argmax(unhygienic_scores)
+        
+        result = {
+            'classification': classification,
+            'confidence': confidence,
+            'area_type': area_type,
+            'overall_scores': {
+                'hygienic': details['hygienic_score'],
+                'unhygienic': details['unhygienic_score']
+            },
+            'top_indicators': {
+                'most_hygienic_match': {
+                    'description': hygienic_prompts[top_hygienic_idx],
+                    'score': hygienic_scores[top_hygienic_idx]
+                },
+                'most_unhygienic_match': {
+                    'description': unhygienic_prompts[top_unhygienic_idx],
+                    'score': unhygienic_scores[top_unhygienic_idx]
+                }
+            }
         }
         
-        return tracked_persons
+        return result
     
-    def smooth_activity(self, person_id, activity, confidence):
-        """Smooth activity prediction using history"""
-        if confidence > 0.4:  # Only add reasonably confident predictions
-            self.activity_history[person_id].append(activity)
+    def batch_assess_hygiene(self, images, area_types=None):
+        """Assess hygiene for multiple images at once"""
+        results = []
+        for i, image in enumerate(images):
+            print(f"Processing image {i+1}/{len(images)}...")
+            area_type = area_types[i] if area_types and i < len(area_types) else None
+            result = self.detailed_assessment(image, area_type)
+            results.append(result)
+        return results
+
+def load_image(image_path):
+    """Load image from file path or URL"""
+    try:
+        if image_path.startswith('http'):
+            response = requests.get(image_path, timeout=10)
+            response.raise_for_status()
+            image = Image.open(BytesIO(response.content))
+        else:
+            image = Image.open(image_path)
         
-        if len(self.activity_history[person_id]) == 0:
-            return "unknown"
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
         
-        # Get most common activity in recent history
-        activity_counts = {}
-        for act in self.activity_history[person_id]:
-            activity_counts[act] = activity_counts.get(act, 0) + 1
-        
-        return max(activity_counts, key=activity_counts.get)
+        return image
+    except Exception as e:
+        print(f"Error loading image {image_path}: {e}")
+        return None
+
+def print_assessment_results(result, image_path=""):
+    """Print formatted assessment results"""
+    if 'error' in result:
+        print(f"✗ Assessment failed for {image_path}")
+        return
     
-    def draw_results(self, frame, tracked_persons):
-        """Draw bounding boxes and activity labels"""
-        for person in tracked_persons:
-            person_id = person['id']
-            x1, y1, x2, y2 = person['bbox']
-            
-            # Extract person crop (with padding)
-            h, w = frame.shape[:2]
-            x1_crop = max(0, x1-10)
-            y1_crop = max(0, y1-10)
-            x2_crop = min(w, x2+10)
-            y2_crop = min(h, y2+10)
-            
-            person_crop = frame[y1_crop:y2_crop, x1_crop:x2_crop]
-            
-            if person_crop.size > 0 and person_crop.shape[0] > 30 and person_crop.shape[1] > 30:
-                # Classify activity
-                activity, confidence = self.classify_activity(person_crop)
-                
-                # Smooth the activity prediction
-                smoothed_activity = self.smooth_activity(person_id, activity, confidence)
-                
-                # Get color for activity
-                color = self.activity_colors.get(smoothed_activity, (255, 255, 255))
-                
-                # Draw bounding box
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                
-                # Draw labels
-                label = f"ID:{person_id} {smoothed_activity} ({confidence:.2f})"
-                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                
-                # Background for text
-                cv2.rectangle(frame, (x1, y1-30), (x1 + label_size[0], y1), color, -1)
-                cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 
-                           0.6, (0, 0, 0), 2)
-        
-        return frame
+    print(f"\n{'='*60}")
+    print(f"HYGIENE ASSESSMENT RESULTS")
+    if image_path:
+        print(f"Image: {os.path.basename(image_path)}")
+    print(f"{'='*60}")
+    print(f"Area Type: {result['area_type'].upper()}")
+    print(f"Classification: {result['classification']}")
+    print(f"Confidence: {result['confidence']:.2%}")
+    print(f"\nOverall Scores:")
+    print(f"  Hygienic: {result['overall_scores']['hygienic']:.3f}")
+    print(f"  Unhygienic: {result['overall_scores']['unhygienic']:.3f}")
+    print(f"\nTop Indicators:")
+    print(f"  Best hygienic match:")
+    print(f"    '{result['top_indicators']['most_hygienic_match']['description']}'")
+    print(f"    Score: {result['top_indicators']['most_hygienic_match']['score']:.3f}")
+    print(f"  Best unhygienic match:")
+    print(f"    '{result['top_indicators']['most_unhygienic_match']['description']}'")
+    print(f"    Score: {result['top_indicators']['most_unhygienic_match']['score']:.3f}")
+
+def analyze_hygiene_from_path(image_path, area_type=None, classifier=None):
+    """Analyze hygiene from image file path"""
+    if classifier is None:
+        classifier = HygieneClassifier()
     
-    def run(self):
-        """Main loop to run the activity tracking system"""
-        cap = cv2.VideoCapture(0)
+    # Load image
+    image = load_image(image_path)
+    if image is None:
+        return None
+    
+    # Get detailed assessment
+    result = classifier.detailed_assessment(image, area_type)
+    
+    # Print results
+    print_assessment_results(result, image_path)
+    
+    return result
+
+def analyze_multiple_images(image_paths, area_types=None, classifier=None):
+    """Analyze multiple images for hygiene"""
+    if classifier is None:
+        classifier = HygieneClassifier()
+    
+    images = []
+    valid_paths = []
+    
+    for path in image_paths:
+        image = load_image(path)
+        if image is not None:
+            images.append(image)
+            valid_paths.append(path)
+        else:
+            print(f"Skipping {path} due to loading error")
+    
+    if not images:
+        print("No valid images to process")
+        return []
+    
+    results = classifier.batch_assess_hygiene(images, area_types)
+    
+    # Print results
+    for i, result in enumerate(results):
+        print_assessment_results(result, valid_paths[i])
+    
+    return results
+
+def interactive_demo():
+    """Interactive demonstration of the hygiene classifier"""
+    print("\n" + "="*60)
+    print("CLIP HYGIENE CLASSIFIER - INTERACTIVE DEMO")
+    print("="*60)
+    
+    # Initialize classifier
+    try:
+        classifier = HygieneClassifier()
+    except Exception as e:
+        print(f"Failed to initialize classifier: {e}")
+        return
+    
+    while True:
+        print("\nOptions:")
+        print("1. Analyze single image")
+        print("2. Analyze multiple images")
+        print("3. Test with online demo images")
+        print("4. Show supported area types")
+        print("5. Exit")
         
-        if not cap.isOpened():
-            print("Error: Could not open webcam")
-            return
+        choice = input("\nSelect option (1-5): ").strip()
         
-        print("Starting Person Activity Tracking System with Transformers...")
-        print("Activities detected: sitting, standing, walking, sleeping, talking, running, lying, raising hand, eating, reading")
-        print("Press 'q' to quit")
+        if choice == '1':
+            image_path = input("Enter image path or URL: ").strip()
+            if image_path:
+                area_type = input("Specify area type (toilet/kitchen/hospital/dining) or press Enter for auto-detection: ").strip()
+                area_type = area_type if area_type in ['toilet', 'kitchen', 'hospital', 'dining'] else None
+                analyze_hygiene_from_path(image_path, area_type, classifier)
         
-        fps_counter = 0
-        start_time = time.time()
+        elif choice == '2':
+            print("Enter image paths (one per line, empty line to finish):")
+            image_paths = []
+            while True:
+                path = input(f"Image {len(image_paths) + 1}: ").strip()
+                if not path:
+                    break
+                image_paths.append(path)
+            
+            if image_paths:
+                analyze_multiple_images(image_paths, classifier=classifier)
         
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Error: Could not read frame")
-                break
+        elif choice == '3':
+            demo_images = {
+                'kitchen': 'https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=500',
+                'bathroom': 'https://images.unsplash.com/photo-1620626011761-996317b8d101?w=500'
+            }
             
-            # Detect persons
-            persons = self.detect_persons(frame)
-            
-            # Track persons
-            tracked_persons = self.simple_tracker(persons)
-            
-            # Draw results
-            frame = self.draw_results(frame, tracked_persons)
-            
-            # Calculate and display FPS
-            fps_counter += 1
-            if fps_counter % 30 == 0:
-                end_time = time.time()
-                fps = 30 / (end_time - start_time)
-                start_time = end_time
-                print(f"FPS: {fps:.2f}")
-            
-            # Draw info on frame
-            cv2.putText(frame, f"Persons: {len(tracked_persons)}", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            model_info = "CLIP" if self.use_classifier else "BLIP"
-            cv2.putText(frame, f"Model: {model_info}", (10, 70), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # Show frame
-            cv2.imshow('Person Activity Tracking - Transformers', frame)
-            
-            # Exit on 'q' key press
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            print("Testing with demo images...")
+            for area, url in demo_images.items():
+                print(f"\nTesting {area} image...")
+                try:
+                    analyze_hygiene_from_path(url, area, classifier)
+                except Exception as e:
+                    print(f"Error with demo image: {e}")
         
-        cap.release()
-        cv2.destroyAllWindows()
+        elif choice == '4':
+            print("\nSupported area types:")
+            for area in classifier.hygiene_prompts.keys():
+                print(f"  - {area}")
+        
+        elif choice == '5':
+            print("Goodbye!")
+            break
+        
+        else:
+            print("Invalid choice. Please select 1-5.")
 
 def main():
-    """Main function to run the activity tracker"""
-    try:
-        # Check if all required modules are available
-        if not TRANSFORMERS_AVAILABLE:
-            print("Error: Transformers module is not installed.")
-            print("Please install Transformers using:")
-            print("pip install transformers")
-            return
-            
-        if not YOLO_AVAILABLE:
-            print("Error: YOLOv8 module is not installed.")
-            print("Please install it using: pip install ultralytics")
-            return
+    """Main function"""
+    print("🧹 CLIP Hygiene Classification System")
+    print("=====================================")
+    
+    if len(sys.argv) > 1:
+        # Command line usage
+        image_paths = sys.argv[1:]
+        print(f"Analyzing {len(image_paths)} image(s)...")
         
-        # Initialize the tracker
-        tracker = PersonActivityTrackerTransformers()
-        
-        # Run the tracking system
-        tracker.run()
-        
-    except KeyboardInterrupt:
-        print("\nSystem interrupted by user")
-    except Exception as e:
-        print(f"Error: {e}")
-        print("\nInstallation Instructions:")
-        print("1. Install PyTorch:")
-        print("   pip install torch torchvision torchaudio")
-        print("2. Install Transformers:")
-        print("   pip install transformers")
-        print("3. Install YOLOv8:")
-        print("   pip install ultralytics")
-        print("4. Install other dependencies:")
-        print("   pip install opencv-python pillow numpy")
+        if len(image_paths) == 1:
+            analyze_hygiene_from_path(image_paths[0])
+        else:
+            analyze_multiple_images(image_paths)
+    else:
+        # Interactive mode
+        interactive_demo()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nExiting...")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
