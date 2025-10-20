@@ -1,0 +1,68 @@
+{
+    "hygiene_prompts": {
+        "toilet": {
+            "hygienic": [
+                "a clean toilet with no stains or dirt",
+                "a spotless bathroom with clean tiles",
+                "a well-maintained toilet area",
+                "a sanitized restroom facility",
+                "a pristine toilet bowl and surrounding area"
+            ],
+            "unhygienic": [
+                "a dirty toilet with stains and grime",
+                "an unclean bathroom with visible dirt",
+                "a neglected toilet area with poor maintenance",
+                "an unsanitary restroom facility",
+                "a filthy toilet with visible contamination"
+            ]
+        },
+        "kitchen": {
+            "hygienic": [
+                "a clean kitchen with spotless countertops",
+                "a well-organized kitchen with clean surfaces",
+                "a sanitized cooking area",
+                "a pristine kitchen with clean appliances",
+                "a hygienic food preparation area"
+            ],
+            "unhygienic": [
+                "a dirty kitchen with food debris and stains",
+                "an unclean cooking area with grease buildup",
+                "a messy kitchen with unwashed dishes",
+                "a contaminated food preparation surface",
+                "a filthy kitchen with poor sanitation"
+            ]
+        },
+        "hospital": {
+            "hygienic": [
+                "a sterile hospital room with clean equipment",
+                "a sanitized medical facility",
+                "a pristine healthcare environment",
+                "a well-maintained hospital area",
+                "a hygienic medical treatment room"
+            ],
+            "unhygienic": [
+                "an unclean hospital room with contamination",
+                "a poorly maintained medical facility",
+                "a dirty healthcare environment",
+                "an unsanitary hospital area",
+                "a contaminated medical treatment space"
+            ]
+        },
+        "dining": {
+            "hygienic": [
+                "a clean dining table with spotless surface",
+                "a well-set dining area with clean tableware",
+                "a sanitized eating area",
+                "a pristine dining table ready for meals",
+                "a hygienic food serving area"
+            ],
+            "unhygienic": [
+                "a dirty dining table with food remnants",
+                "an unclean eating area with stains",
+                "a messy dining table with spills",
+                "a contaminated food serving surface",
+                "a filthy dining area with poor cleanliness"
+            ]
+        }
+    }
+}
